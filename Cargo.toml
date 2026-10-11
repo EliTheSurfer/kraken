@@ -1,6 +1,6 @@
 [package]
 name = "kraken"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A GitKraken-style git graph in the terminal: pixel-drawn lanes and avatars, fuzzy finding, checkout, reset and rebase"
 license = "MIT"
