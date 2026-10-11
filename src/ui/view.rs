@@ -9,7 +9,7 @@ use ratatui_image::protocol::Protocol;
 
 use super::finder::EntryKind;
 use super::state::{App, Focus, PickerPurpose};
-use crate::git::{Detail, Head, Ref, RefKind};
+use crate::git::{Detail, Head, Ref, RefBadge, RefKind, ref_badges};
 use crate::render::palette::rgb;
 use crate::render::text::{render_continuation, render_row};
 
@@ -22,12 +22,46 @@ pub struct ViewContext<'a> {
     pub graph: GraphWidget<'a>,
     pub detail: Option<&'a Detail>,
     pub remote_icon: &'a str,
+    pub ref_logos: Option<&'a RefLogos>,
     pub repo_name: &'a str,
 }
 
+pub struct RefLogos {
+    pub local: Vec<Protocol>,
+    pub remote: Vec<Protocol>,
+}
+
+impl RefLogos {
+    fn get(&self, mark: Mark, color: usize) -> Option<&Protocol> {
+        let logos = match mark {
+            Mark::Local => &self.local,
+            Mark::Remote => &self.remote,
+        };
+        logos.get(color % logos.len().max(1))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Mark {
+    Local,
+    Remote,
+}
+
+struct RefLabel {
+    line: Line<'static>,
+    marks: Vec<(u16, Mark)>,
+}
+
+pub const LOGO_CELLS: u16 = 2;
+pub const LABEL_INK: (u8, u8, u8) = (16, 18, 26);
 pub const GRAPH_MAX_SHARE: f32 = 0.4;
 pub const DETAIL_MIN_WIDTH: u16 = 120;
-const REF_COLUMN: u16 = 22;
+const REF_COLUMN_MIN: u16 = 22;
+const REF_COLUMN_MAX: u16 = 50;
+const REF_COLUMN_MAX_SHARE: f32 = 0.3;
+const REF_LABEL_DECORATION: usize = 9;
+const GRAPH_MIN_SHARE: f32 = 0.18;
+const LOCAL_ICON: &str = "\u{f109}";
 const DATE_COLUMN: u16 = 6;
 const GRAPH_TITLE_WIDTH: u16 = 6;
 const TAG_ICON: &str = "\u{f02b}";
@@ -50,7 +84,23 @@ pub fn graph_columns(app: &App, rows_visible: usize, main_width: u16) -> u16 {
         .max(1) as u16;
     let lane_cells = app.lane_cells.max(1);
     let cap = ((main_width as f32 * GRAPH_MAX_SHARE) as u16 / lane_cells).max(1);
-    lanes.min(cap) * lane_cells
+    let min_width = (main_width as f32 * GRAPH_MIN_SHARE) as u16;
+    (lanes.min(cap) * lane_cells).max(min_width)
+}
+
+pub fn ref_column(app: &App, main_width: u16) -> u16 {
+    let longest = app
+        .refs
+        .refs
+        .iter()
+        .map(|reference| reference.short_name().chars().count() + REF_LABEL_DECORATION)
+        .max()
+        .unwrap_or(0);
+    let cap =
+        ((main_width as f32 * REF_COLUMN_MAX_SHARE) as u16).clamp(REF_COLUMN_MIN, REF_COLUMN_MAX);
+    u16::try_from(longest)
+        .unwrap_or(u16::MAX)
+        .clamp(REF_COLUMN_MIN, cap)
 }
 
 pub fn areas(app: &App, full: Rect) -> (Rect, Rect, Option<Rect>, Rect) {
@@ -74,7 +124,7 @@ pub fn areas(app: &App, full: Rect) -> (Rect, Rect, Option<Rect>, Rect) {
     (header, main, panel, status)
 }
 
-const PANEL_SHARE: u16 = 35;
+const PANEL_SHARE: u16 = 25;
 
 pub fn panel_fits(width: u16) -> bool {
     width >= DETAIL_MIN_WIDTH
@@ -97,7 +147,7 @@ pub fn graph_area(app: &App, full: Rect) -> Rect {
     let (_, main, _, _) = areas(app, full);
     let width = graph_columns(app, visible_rows(app, main.height), main.width);
     Rect {
-        x: main.x + REF_COLUMN,
+        x: main.x + ref_column(app, main.width),
         y: main.y,
         width,
         height: main.height,
@@ -109,7 +159,7 @@ pub fn draw(frame: &mut Frame, app: &App, context: &ViewContext) {
     let graph_width =
         graph_columns(app, visible_rows(app, main.height), main.width).max(GRAPH_TITLE_WIDTH);
     let [refs_area, graph, message_area, date_area] = Layout::horizontal([
-        Constraint::Length(REF_COLUMN),
+        Constraint::Length(ref_column(app, main.width)),
         Constraint::Length(graph_width),
         Constraint::Min(10),
         Constraint::Length(DATE_COLUMN),
@@ -234,16 +284,22 @@ fn draw_rows(frame: &mut Frame, app: &App, context: &ViewContext, main: Rect, co
         let row_style = background.map_or(Style::default(), |background| {
             Style::default().bg(background)
         });
-        let lane_color = lane_color(app.rows[index].color);
-        for (line_offset, label) in
-            ref_lines(app, index, height as usize, lane_color, context.remote_icon)
-                .into_iter()
-                .enumerate()
+        let color_index = app.rows[index].color;
+        let lane_color = lane_color(color_index);
+        for (line_offset, label) in ref_lines(
+            app,
+            index,
+            height as usize,
+            refs_area.width as usize,
+            color_index,
+            context,
+        )
+        .into_iter()
+        .enumerate()
         {
-            frame.render_widget(
-                Paragraph::new(label),
-                cell(refs_area, y + line_offset as u16),
-            );
+            let label_area = cell(refs_area, y + line_offset as u16);
+            frame.render_widget(Paragraph::new(label.line), label_area);
+            draw_logos(frame, context, &label.marks, color_index, label_area);
         }
         if let GraphWidget::Text = context.graph {
             let text = render_row(&app.rows[index]);
@@ -329,14 +385,42 @@ fn ordered_refs(app: &App, index: usize) -> Vec<&Ref> {
     ordered
 }
 
+fn draw_logos(
+    frame: &mut Frame,
+    context: &ViewContext,
+    marks: &[(u16, Mark)],
+    color: usize,
+    label_area: Rect,
+) {
+    let Some(logos) = context.ref_logos else {
+        return;
+    };
+    for (offset, mark) in marks
+        .iter()
+        .filter(|(offset, _)| offset + LOGO_CELLS <= label_area.width)
+    {
+        if let Some(protocol) = logos.get(*mark, color) {
+            frame.render_widget(
+                Image::new(protocol),
+                Rect {
+                    x: label_area.x + offset,
+                    width: LOGO_CELLS,
+                    ..label_area
+                },
+            );
+        }
+    }
+}
+
 fn ref_lines(
     app: &App,
     index: usize,
     height: usize,
-    color: Color,
-    remote_icon: &str,
-) -> Vec<Line<'static>> {
-    let refs = ordered_refs(app, index);
+    width: usize,
+    color: usize,
+    context: &ViewContext,
+) -> Vec<RefLabel> {
+    let refs = ref_badges(&ordered_refs(app, index));
     let shown = if refs.len() > height {
         height.saturating_sub(1).max(1)
     } else {
@@ -352,40 +436,70 @@ fn ref_lines(
             } else {
                 String::new()
             };
-            ref_label(app, reference, &extra, color, remote_icon)
+            ref_label(app, reference, &extra, width, color, context)
         })
         .collect()
 }
 
 fn ref_label(
     app: &App,
-    reference: &Ref,
+    badge: &RefBadge,
     extra: &str,
-    color: Color,
-    remote_icon: &str,
-) -> Line<'static> {
-    let checked_out = matches!(&app.refs.head, Head::Branch(name) if name == &reference.name && reference.kind == RefKind::Local);
-    let mut text = String::new();
-    if checked_out {
-        text.push_str("✓ ");
+    width: usize,
+    color_index: usize,
+    context: &ViewContext,
+) -> RefLabel {
+    let color = lane_color(color_index);
+    let checked_out =
+        badge.local && matches!(&app.refs.head, Head::Branch(name) if name == &badge.name);
+    let prefix = match (checked_out, badge.tag) {
+        (true, _) => "✓ ".to_string(),
+        (false, true) => format!("{TAG_ICON} "),
+        (false, false) => String::new(),
+    };
+    let marks: Vec<Mark> = [(badge.local, Mark::Local), (badge.remote, Mark::Remote)]
+        .into_iter()
+        .filter(|(present, _)| *present)
+        .map(|(_, mark)| mark)
+        .collect();
+    let mark_text = |mark: &Mark| match (context.ref_logos, mark) {
+        (Some(_), _) => " ".repeat(LOGO_CELLS as usize),
+        (None, Mark::Local) => LOCAL_ICON.to_string(),
+        (None, Mark::Remote) => context.remote_icon.to_string(),
+    };
+    let suffix: String = marks
+        .iter()
+        .map(|mark| format!(" {}", mark_text(mark)))
+        .chain([" ".to_string()])
+        .collect();
+    let room = width.saturating_sub(
+        1 + extra.chars().count() + prefix.chars().count() + suffix.chars().count(),
+    );
+    let name = truncate(&badge.name, room);
+    let marks_start = prefix.chars().count() + name.chars().count();
+    let mark_offsets = marks
+        .iter()
+        .enumerate()
+        .map(|(position, mark)| {
+            let offset = marks_start + 1 + position * (LOGO_CELLS as usize + 1);
+            (offset as u16, *mark)
+        })
+        .collect();
+    RefLabel {
+        line: Line::from(vec![
+            Span::styled(
+                format!("{prefix}{name}{suffix}"),
+                Style::default().fg(lane_ink()).bg(color),
+            ),
+            Span::styled(extra.to_string(), Style::default().fg(color)),
+        ]),
+        marks: mark_offsets,
     }
-    text.push_str(&reference.name);
-    match reference.kind {
-        RefKind::Remote { .. } => text = format!("{remote_icon} {text}"),
-        RefKind::Tag => text = format!("{TAG_ICON} {text}"),
-        RefKind::Local => {}
-    }
-    let room = REF_COLUMN as usize - 1 - extra.chars().count();
-    Line::from(vec![
-        Span::styled(
-            truncate(&text, room),
-            Style::default()
-                .fg(Color::Rgb(16, 18, 26))
-                .bg(color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(extra.to_string(), Style::default().fg(color)),
-    ])
+}
+
+fn lane_ink() -> Color {
+    let (red, green, blue) = LABEL_INK;
+    Color::Rgb(red, green, blue)
 }
 
 fn pick_primary<'a>(refs: &[&'a Ref], head: &Head) -> Option<&'a Ref> {
@@ -840,6 +954,25 @@ mod tests {
         app
     }
 
+    fn app_with_tag() -> App {
+        let mut refs = app().refs;
+        refs.refs.push(Ref {
+            name: "v1.0".to_string(),
+            kind: RefKind::Tag,
+            target: "c0".to_string(),
+        });
+        let mut app = App::new(refs);
+        app.add_commits(
+            vec![
+                commit("c0", &["c2"], "Merge-free subject"),
+                commit("c1", &["c2"], "Feature work"),
+                commit("c2", &[], "Initial commit"),
+            ],
+            10,
+        );
+        app
+    }
+
     fn render(app: &App, width: u16, detail: Option<&Detail>) -> ratatui::buffer::Buffer {
         render_sized(app, width, 20, detail)
     }
@@ -855,6 +988,7 @@ mod tests {
             graph: GraphWidget::Text,
             detail,
             remote_icon: "G",
+            ref_logos: None,
             repo_name: "kraken",
         };
         terminal
@@ -896,7 +1030,7 @@ mod tests {
 
     #[test]
     fn rows_show_ref_label_extra_count_message_and_date() {
-        let mut app = app();
+        let mut app = app_with_tag();
         app.apply(Action::Down, 10);
         let buffer = render(&app, 160, None);
         let first = line(&buffer, 1);
@@ -969,7 +1103,7 @@ mod tests {
 
     #[test]
     fn tall_rows_show_two_refs_without_a_counter() {
-        let mut app = app();
+        let mut app = app_with_tag();
         app.row_lines = 2;
         app.apply(Action::Down, 10);
         let buffer = render(&app, 160, None);
@@ -978,23 +1112,41 @@ mod tests {
             "{:?}",
             line(&buffer, 1)
         );
-        assert!(
-            line(&buffer, 2).contains("G origin/main"),
-            "{:?}",
-            line(&buffer, 2)
-        );
+        assert!(line(&buffer, 2).contains("v1.0"), "{:?}", line(&buffer, 2));
         assert!(!line(&buffer, 1).contains("+1"));
     }
 
     #[test]
-    fn selected_row_expands_to_list_every_ref_and_pushes_the_next_rows_down() {
-        let mut app = app();
-        app.refs.refs.push(Ref {
-            name: "v1.0".to_string(),
-            kind: RefKind::Tag,
-            target: "c0".to_string(),
+    fn local_branch_and_its_remote_share_one_label_ending_with_both_icons() {
+        let buffer = render(&app(), 160, None);
+        assert!(
+            line(&buffer, 1).contains(&format!("✓ main {LOCAL_ICON} G")),
+            "{:?}",
+            line(&buffer, 1)
+        );
+    }
+
+    #[test]
+    fn local_only_branch_ends_with_the_local_icon_alone() {
+        let buffer = render(&app(), 160, None);
+        assert!(
+            line(&buffer, 2).contains(&format!("feature {LOCAL_ICON} ")),
+            "{:?}",
+            line(&buffer, 2)
+        );
+    }
+
+    #[test]
+    fn remote_only_branch_drops_the_remote_prefix_and_ends_with_the_remote_icon() {
+        let mut refs = app().refs;
+        refs.refs.push(Ref {
+            name: "origin/review".to_string(),
+            kind: RefKind::Remote {
+                remote: "origin".to_string(),
+            },
+            target: "c1".to_string(),
         });
-        let mut app = App::new(app.refs.clone());
+        let mut app = App::new(refs);
         app.add_commits(
             vec![
                 commit("c0", &["c2"], "Merge-free subject"),
@@ -1003,22 +1155,48 @@ mod tests {
             ],
             10,
         );
+        app.apply(Action::Down, 10);
+        let buffer = render(&app, 160, None);
+        assert!(
+            line(&buffer, 3).contains("review G"),
+            "{:?}",
+            line(&buffer, 3)
+        );
+    }
+
+    #[test]
+    fn pixel_logos_get_two_blank_cells_each_right_after_the_name() {
+        let app = app();
+        let logos = RefLogos {
+            local: Vec::new(),
+            remote: Vec::new(),
+        };
+        let context = ViewContext {
+            graph: GraphWidget::Text,
+            detail: None,
+            remote_icon: "G",
+            ref_logos: Some(&logos),
+            repo_name: "kraken",
+        };
+        let badge = &ref_badges(&app.refs_at(0))[0];
+        let label = ref_label(&app, badge, "", 40, 0, &context);
+        assert_eq!(label.marks, vec![(7, Mark::Local), (10, Mark::Remote)]);
+    }
+
+    #[test]
+    fn selected_row_expands_to_list_every_ref_and_pushes_the_next_rows_down() {
+        let app = app_with_tag();
         let buffer = render(&app, 160, None);
         assert!(
             line(&buffer, 1).contains("✓ main"),
             "{:?}",
             line(&buffer, 1)
         );
+        assert!(line(&buffer, 2).contains("v1.0"), "{:?}", line(&buffer, 2));
         assert!(
-            line(&buffer, 2).contains("origin/main"),
+            line(&buffer, 3).contains("Feature work"),
             "{:?}",
-            line(&buffer, 2)
-        );
-        assert!(line(&buffer, 3).contains("v1.0"), "{:?}", line(&buffer, 3));
-        assert!(
-            line(&buffer, 4).contains("Feature work"),
-            "{:?}",
-            line(&buffer, 4)
+            line(&buffer, 3)
         );
     }
 
@@ -1071,7 +1249,7 @@ mod tests {
         }
         let buffer = render(&app, 160, None);
         let row = (0..buffer.area.height)
-            .find(|&y| line(&buffer, y).contains("Feature work"))
+            .find(|&y| line(&buffer, y).contains("Feature work  c1"))
             .expect("finder row");
         assert!(
             line(&buffer, row).contains("c1"),
@@ -1162,9 +1340,9 @@ mod tests {
     }
 
     #[test]
-    fn graph_column_is_capped_at_forty_percent() {
+    fn graph_column_keeps_a_minimum_share_of_the_width() {
         let app = app();
-        assert_eq!(graph_columns(&app, 10, 100), 4);
+        assert_eq!(graph_columns(&app, 10, 100), 18);
         assert_eq!(graph_columns(&app, 10, 5), 2);
     }
 }

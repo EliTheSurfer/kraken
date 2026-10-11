@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::git::{Commit, Head, Refs, ResetMode};
+use crate::git::{Commit, Head, Refs, ResetMode, ref_badges};
 use crate::graph::{Layout, Row};
 use crate::ui::finder::{Entry, EntryKind, rank};
 
@@ -269,7 +269,7 @@ impl App {
         if index != self.selected {
             return base;
         }
-        base.max(self.refs_at(index).len() as u16)
+        base.max(ref_badges(&self.refs_at(index)).len() as u16)
     }
 
     pub fn head_hash(&self) -> Option<String> {

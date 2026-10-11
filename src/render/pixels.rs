@@ -249,7 +249,7 @@ fn avatar_pixmap(avatar: &RgbaImage) -> Option<Pixmap> {
     )
 }
 
-fn to_image(pixmap: &Pixmap) -> RgbaImage {
+pub(crate) fn to_image(pixmap: &Pixmap) -> RgbaImage {
     let rgba = pixmap
         .pixels()
         .iter()

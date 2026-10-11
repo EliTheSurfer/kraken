@@ -13,7 +13,7 @@ pub use checkout::{
     CheckoutPlan, commits_dropped_by_reset, plan_checkout, reset_question, run_checkout,
 };
 pub use log::{Commit, CommitStream, Person};
-pub use refs::{Head, Ref, RefKind, Refs, read_refs};
+pub use refs::{Head, Ref, RefBadge, RefKind, Refs, read_refs, ref_badges};
 pub use rewrite::{
     RebaseOutcome, ResetMode, abort_rebase, changed_files, commits_leaving, rebase_in_progress,
     rebase_onto, reset_mode_question, reset_to,

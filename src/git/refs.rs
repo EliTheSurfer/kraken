@@ -18,6 +18,51 @@ pub struct Ref {
     pub target: String,
 }
 
+impl Ref {
+    pub fn short_name(&self) -> &str {
+        match &self.kind {
+            RefKind::Remote { remote } => self
+                .name
+                .strip_prefix(remote.as_str())
+                .and_then(|rest| rest.strip_prefix('/'))
+                .unwrap_or(&self.name),
+            RefKind::Local | RefKind::Tag => &self.name,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RefBadge {
+    pub name: String,
+    pub local: bool,
+    pub remote: bool,
+    pub tag: bool,
+}
+
+pub fn ref_badges(refs: &[&Ref]) -> Vec<RefBadge> {
+    refs.iter().fold(Vec::new(), |mut badges, reference| {
+        let tag = reference.kind == RefKind::Tag;
+        let local = reference.kind == RefKind::Local;
+        let name = reference.short_name();
+        let existing = badges
+            .iter_mut()
+            .find(|badge: &&mut RefBadge| !tag && !badge.tag && badge.name == name);
+        match existing {
+            Some(badge) => {
+                badge.local |= local;
+                badge.remote |= !local;
+            }
+            None => badges.push(RefBadge {
+                name: name.to_string(),
+                local,
+                remote: !local && !tag,
+                tag,
+            }),
+        }
+        badges
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Head {
     Branch(String),

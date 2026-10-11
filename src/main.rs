@@ -26,11 +26,16 @@ use kraken::git::{
     changed_files, commits_dropped_by_reset, commits_leaving, plan_checkout, read_refs,
     rebase_in_progress, rebase_onto, reset_mode_question, reset_question, reset_to, run_checkout,
 };
+use kraken::render::icons::{Logo, draw_logo};
+use kraken::render::palette::PALETTE;
 use kraken::render::pixels::{Geometry, NodeLook, draw_window, visible_lanes};
 use kraken::sync::{SyncCommand, SyncEvent, SyncWorker};
 use kraken::ui::keys::{InputMode, action_for};
 use kraken::ui::state::{App, Confirmation, Effect, PendingAction};
-use kraken::ui::view::{GraphWidget, ViewContext, draw, graph_area, panel_fits, visible_rows};
+use kraken::ui::view::{
+    GraphWidget, LABEL_INK, LOGO_CELLS, RefLogos, ViewContext, draw, graph_area, panel_fits,
+    visible_rows,
+};
 
 const BATCH_SIZE: usize = 500;
 const SYNC_POLL: Duration = Duration::from_secs(2);
@@ -93,6 +98,9 @@ fn run(repo: Repo, options: Options) -> Result<()> {
         Picker::from_query_stdio().ok()
     };
     let picker = picker.filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
+    let ref_logos = picker
+        .as_ref()
+        .and_then(|picker| ref_logos(picker, remote_logo(&remote_url)));
     let repo_name = repo
         .root
         .file_name()
@@ -119,6 +127,7 @@ fn run(repo: Repo, options: Options) -> Result<()> {
         picker,
         avatars,
         &remote_icon,
+        ref_logos.as_ref(),
         &repo_name,
     );
     close_terminal();
@@ -147,6 +156,39 @@ fn remote_icon(remote_url: &str) -> String {
         return GITLAB_ICON.to_string();
     }
     GIT_ICON.to_string()
+}
+
+fn remote_logo(remote_url: &str) -> Logo {
+    if remote_url.contains("github") {
+        return Logo::Github;
+    }
+    if remote_url.contains("gitlab") {
+        return Logo::Gitlab;
+    }
+    Logo::Git
+}
+
+fn ref_logos(picker: &Picker, remote: Logo) -> Option<RefLogos> {
+    let font = picker.font_size();
+    let width = font.width as u32 * LOGO_CELLS as u32;
+    let height = font.height as u32;
+    let protocols = |logo: Logo| {
+        PALETTE
+            .iter()
+            .map(|color| {
+                picker.new_protocol(
+                    DynamicImage::ImageRgba8(draw_logo(logo, width, height, *color, LABEL_INK)),
+                    Size::new(LOGO_CELLS, 1),
+                    Resize::Fit(None),
+                )
+            })
+            .collect::<Result<Vec<Protocol>, _>>()
+            .ok()
+    };
+    Some(RefLogos {
+        local: protocols(Logo::Laptop)?,
+        remote: protocols(remote)?,
+    })
 }
 
 fn forge_for(remote_url: &str) -> Forge {
@@ -208,6 +250,7 @@ fn event_loop(
     picker: Option<Picker>,
     mut avatars: Option<AvatarStore>,
     remote_icon: &str,
+    ref_logos: Option<&RefLogos>,
     repo_name: &str,
 ) -> Result<()> {
     let mut app = App::new(refs);
@@ -337,6 +380,7 @@ fn event_loop(
                 graph: graph_widget,
                 detail: selected_hash.as_ref().and_then(|hash| details.get(hash)),
                 remote_icon,
+                ref_logos,
                 repo_name,
             };
             draw(frame, &app, &context);
@@ -617,5 +661,12 @@ mod tests {
         assert_eq!(remote_icon("git@github.com:a/b.git"), GITHUB_ICON);
         assert_eq!(remote_icon("git@gitlab.example.net:a/b.git"), GITLAB_ICON);
         assert_eq!(remote_icon(""), GIT_ICON);
+    }
+
+    #[test]
+    fn remote_logo_follows_the_host() {
+        assert_eq!(remote_logo("git@github.com:a/b.git"), Logo::Github);
+        assert_eq!(remote_logo("git@gitlab.example.net:a/b.git"), Logo::Gitlab);
+        assert_eq!(remote_logo(""), Logo::Git);
     }
 }
